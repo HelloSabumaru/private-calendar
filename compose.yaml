@@ -1,6 +1,8 @@
 services:
   calendar:
+    image: ${CALENDAR_IMAGE:-private-calendar:local}
     build: .
+    pull_policy: build
     env_file: .env
     ports:
       - "127.0.0.1:6742:6742"
@@ -9,3 +11,6 @@ services:
     read_only: true
     cap_drop: [ ALL ]
     security_opt: [ no-new-privileges:true ]
+    mem_limit: 1g
+    cpus: 2.0
+    pids_limit: 128

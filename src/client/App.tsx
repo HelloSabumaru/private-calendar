@@ -12,6 +12,7 @@ import { browserTimezone, useSession } from './useSession';
 import { useCalendarData } from './useCalendarData';
 import { useEventSearch } from './useEventSearch';
 import { useEventEditor } from './useEventEditor';
+import { isDemo } from './api';
 
 const colorStyle = (color: string) => {
   const channels = [1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16) / 255).map(c => c <= .04045 ? c / 12.92 : ((c + .055) / 1.055) ** 2.4);
@@ -87,10 +88,10 @@ export function App() {
   const refreshLabel = loading ? 'Refreshing…' : lastRefresh ? `Updated ${timeLabel(lastRefresh, prefs.timezone, prefs.hour12)}` : 'Refresh';
 
   return <>
-    {!session ? <LoginScreen error={error} loading={sessionLoading || signingIn} hasDraft={!!editor} onLogin={signIn} /> : <div className="app-shell">
+    {!session ? isDemo ? <main className="main"><p role={error ? 'alert' : 'status'}>{error || 'Loading calendar…'}</p>{!sessionLoading && <button onClick={() => window.location.reload()}>Reload demo</button>}</main> : <LoginScreen error={error} loading={sessionLoading || signingIn} hasDraft={!!editor} onLogin={signIn} /> : <div className="app-shell">
       <a className="skip-link" href="#calendar-main">Skip to calendar</a>
       <header className="app-toolbar">
-        <span className="app-name"><Icon name="calendar" />Calendar</span>
+        <span className="app-name"><Icon name="calendar" />Calendar{isDemo && ' demo'}</span>
         <div className="view-switch" aria-label="Calendar view">{(['month', 'week', 'day', 'agenda'] as const).map(item => <button key={item} aria-pressed={view === item} onClick={() => setView(item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}</div>
         <select className="mobile-view" aria-label="Calendar view" value={view} onChange={event => setView(event.target.value as typeof view)}><option value="month">Month</option><option value="week">Week</option><option value="day">Day</option><option value="agenda">Agenda</option></select>
         <div className="toolbar-actions">
@@ -101,12 +102,13 @@ export function App() {
           <button className="icon-button" aria-label="Settings" title="Settings" onClick={() => setSettingsOpen(true)}><Icon name="settings" /></button>
           <div className="more-menu" ref={menu}>
             <button className="icon-button" aria-label="More options" title="More options" aria-expanded={menuOpen} aria-controls="account-menu" onClick={() => setMenuOpen(value => !value)}><Icon name="more" /></button>
-            {menuOpen && <div id="account-menu" className="menu-popup"><button onClick={() => { setMenuOpen(false); setTransfer('import'); }}>Import ICS</button><button onClick={() => { setMenuOpen(false); setTransfer('export'); }}>Export calendar</button><button onClick={() => { setMenuOpen(false); void signOut(); }}>Sign out</button></div>}
+            {menuOpen && <div id="account-menu" className="menu-popup"><button onClick={() => { setMenuOpen(false); setTransfer('import'); }}>Import ICS</button><button onClick={() => { setMenuOpen(false); setTransfer('export'); }}>Export calendar</button>{isDemo ? <button onClick={() => window.location.reload()}>Reset demo</button> : <button onClick={() => { setMenuOpen(false); void signOut(); }}>Sign out</button>}</div>}
           </div>
         </div>
         <span className="sr-only" role="status">{refreshLabel}</span>
       </header>
       <main id="calendar-main" className="main" tabIndex={-1}>
+        {isDemo && <p className="empty-state">Sample calendar. Changes reset when you reload.</p>}
         <div className="month-navigation">
           <button className="icon-button" aria-label={`Previous ${view === 'agenda' ? 'month' : view}`} title="Previous" onClick={() => navigate(-1)}><Icon name="left" /></button>
           <div className="month-picker"><h1 aria-label={periodLabel}><button aria-label="Choose date" onClick={() => { setJumpDate(date); setDateOpen(true); }}>{periodLabel}<Icon name="down" /></button></h1></div>

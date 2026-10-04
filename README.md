@@ -6,14 +6,18 @@ Includes month/week/day/agenda views, search, event and occurrence editing, drag
 
 ## Try the demo
 
-Requires Node.js 22.12 or later and npm. No CalDAV account is needed.
+The demo runs entirely in your browser, with sample events around today and no account. Edits reset on reload; preferences persist in this browser.
+
+To run it locally, use Node.js 22.12 or later and npm:
 
 ```bash
 npm ci --include=dev
 npm run demo
 ```
 
-Open **https://localhost:4173**, accept the local certificate warning, and sign in with **user** / **password**. Sample events are in October 2026. Ctrl+C stops the demo; restarting resets its data.
+Open **http://127.0.0.1:4173**. Ctrl+C stops the local preview.
+
+`npm run build:demo` creates `dist/demo`, which can also be served by any static host. Use `npm run preview:demo` to preview that build locally. Connecting to a real CalDAV account requires the server deployment below.
 
 ## Deploy with Docker
 
@@ -41,7 +45,11 @@ calendar.example.net {
 
 For a proxy on the same Docker network, use `calendar:6742`. Frontend and API must share one HTTPS origin. Health check: `/healthz`.
 
-For a private CalDAV CA, mount its PEM file and set `NODE_EXTRA_CA_CERTS` to that path. `CALDAV_ALLOW_HTTP=true` permits a trusted HTTP upstream; browser access still requires HTTPS. See [.env.example](.env.example) for other settings.
+For a private CalDAV CA, mount its PEM file readable by container UID **65532** and set `NODE_EXTRA_CA_CERTS` to that path. `CALDAV_ALLOW_HTTP=true` permits a trusted HTTP upstream; browser access still requires HTTPS. See [.env.example](.env.example) for other settings.
+
+To use a published release, set `CALENDAR_IMAGE=ghcr.io/hellosabumaru/calendar:<version>` in `.env`, replacing `<version>` with a release tag, then run `docker compose up -d --no-build --pull always`. Release images support AMD64 and ARM64. Compose limits the container to 1 GiB of memory, two CPUs, and 128 processes; adjust these limits for your host and workload.
+
+The runtime contains Node.js and application dependencies, without a shell or package managers. Run one application instance; sessions and pending operation status live in memory. After a restart, sign in and inspect the calendar before retrying an uncertain write.
 
 ## Develop with your own server
 
@@ -77,7 +85,7 @@ For production without Docker, use the production `.env` settings, run `npm run 
 | Calendar reads/export | 2,000 resources, 16 MiB of source ICS |
 | Event range | 93 days, 10,000 occurrences |
 
-Requests are limited to 120/minute and logins to 10/minute per direct peer; deployments behind one proxy share these limits.
+Requests default to 120/minute and logins to 10/minute per client IP, configurable with `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_LOGINS`. Forwarded client addresses are ignored by default, so clients behind one proxy share its budget. Set `TRUSTED_PROXIES` to the comma-separated IPs or CIDRs of your proxies to give clients separate budgets. Use the proxy's source address as seen by the container; a host proxy may appear as the Docker network gateway. Your proxy must replace incoming forwarding headers, and direct access to the app must remain restricted.
 
 ## Verify
 
@@ -87,7 +95,10 @@ npm run lint
 npm test
 npx playwright install --with-deps chromium firefox webkit
 npm run test:e2e
+npm run test:demo
 npm run test:interop
+docker build -t private-calendar:check .
+python3 scripts/test-image.py private-calendar:check
 ```
 
 Tests use disposable calendars, without your `.env` credentials. If the demo is running, use `CALENDAR_TEST_PORT=4183 npm run test:e2e`. Interoperability tests require Python 3 with `venv` and install their dependencies automatically; they check the API against Radicale with an independent client.
@@ -104,6 +115,8 @@ docker compose up -d
 Check `/healthz` and sign in again. Back up data on CalDAV. To roll back, restore the previous source and lockfile, then rebuild.
 
 Dependencies and the container base are pinned. Timezone data is IANA **2026e**; regenerate it with `bash scripts/update-timezones.sh` (requires a C compiler, make, GLib development files, Git, curl, and Python). For a new release, update the script's release/checksum and the Node.js base to keep ICU rules current.
+
+Dependabot opens weekly updates for npm packages, both Docker base images, and GitHub Actions. Review and merge these updates through the checks above. Changing a pinned base digest requires a reviewed update; `--pull` alone keeps the existing digest.
 
 ## License
 

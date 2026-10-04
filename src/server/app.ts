@@ -25,6 +25,7 @@ const equal = (a: string, b: string) => { const left = Buffer.from(a), right = B
 
 export async function createApp(config: Config, options: { fetch?: typeof fetch; logger?: boolean | { stream: Writable }; staticRoot?: string; limits?: { requests: number; logins: number } } = {}) {
   const app = Fastify({ bodyLimit: 256 * 1024, requestTimeout: 30000, connectionTimeout: 10000,
+    trustProxy: config.trustedProxies.length ? config.trustedProxies : false,
     logger: options.logger ? { ...(typeof options.logger === 'object' ? { stream: options.logger.stream } : {}),
       serializers: { req: req => ({ method: safeMethod(req.method) }), err: safeError }, redact: ['req.headers.cookie', 'req.headers.authorization'] } : false });
   const sessions = new SessionStore(config);
@@ -34,7 +35,7 @@ export async function createApp(config: Config, options: { fetch?: typeof fetch;
     defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:'],
     connectSrc: ["'self'"], fontSrc: ["'self'"], objectSrc: ["'none'"], frameAncestors: ["'none'"], baseUri: ["'self'"], formAction: ["'self'"],
   } } });
-  await app.register(rateLimit, { max: options.limits?.requests ?? 120, timeWindow: '1 minute' });
+  await app.register(rateLimit, { max: options.limits?.requests ?? config.RATE_LIMIT_REQUESTS, timeWindow: '1 minute' });
   app.decorateRequest('calendarSession', undefined);
   app.decorateRequest('calendarDiagnostics');
   app.addHook('onRequest', async (request, reply) => {
@@ -70,7 +71,7 @@ export async function createApp(config: Config, options: { fetch?: typeof fetch;
     reply.code(status).send(response);
   });
   app.get('/healthz', { config: { rateLimit: false } }, async () => ({ status: 'ok', timezoneVersion }));
-  app.post('/api/session', { config: { rateLimit: { max: options.limits?.logins ?? 10, timeWindow: '1 minute' } } }, async (request, reply) => {
+  app.post('/api/session', { config: { rateLimit: { max: options.limits?.logins ?? config.RATE_LIMIT_LOGINS, timeWindow: '1 minute' } } }, async (request, reply) => {
     const login = loginSchema.parse(request.body);
     if (login.method === 'basic' && (login.username.includes(':') || /[\r\n]/.test(login.username))) throw new ApiError(400, 'USERNAME', 'The username contains unsupported characters.');
     if (login.method === 'bearer' && /[\r\n]/.test(login.token)) throw new ApiError(400, 'TOKEN', 'The token contains unsupported characters.');

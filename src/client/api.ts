@@ -1,5 +1,7 @@
 import type { ApiErrorData } from '../shared';
 
+export const isDemo = import.meta.env.MODE === 'demo';
+
 export class RequestError extends Error {
   constructor(public status: number, public data: ApiErrorData) { super(data.message); }
 }
@@ -14,9 +16,10 @@ export async function api<T>(path: string, options: RequestInit = {}, renewSessi
   const ensureCurrent = () => {
     if (generation !== sessionGeneration) throw new RequestError(401, { code: 'SESSION_CHANGED', message: 'The session changed. Your draft is retained; sign in to the same account to continue.' });
   };
-  const response = await fetch(`/api${path}`, { ...options, credentials: 'same-origin',
+  const request: RequestInit = { ...options, credentials: 'same-origin',
     signal: options.signal ?? AbortSignal.timeout(45000),
-    headers: { ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}), 'X-CSRF-Token': csrf, ...options.headers } });
+    headers: { ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}), 'X-CSRF-Token': csrf, ...options.headers } };
+  const response = isDemo ? await (await import('./demo')).demoRequest(path, request) : await fetch(`/api${path}`, request);
   let body;
   try { body = await response.json(); } catch { throw new RequestError(response.status, { code: 'NETWORK', message: 'The server returned an unreadable response. Your draft is retained.' }); }
   ensureCurrent();

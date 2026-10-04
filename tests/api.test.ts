@@ -6,6 +6,73 @@ import { defaultRecurrence, type Calendar, type EventDraft, type EventDetail } f
 import { mockDav } from './dav-server.js';
 import { writeEvent } from '../src/server/ics.js';
 
+describe('deployment rate limits', () => {
+  let system: Awaited<ReturnType<typeof createApp>> | undefined;
+  const origin = 'https://calendar.test';
+  const start = async (env: NodeJS.ProcessEnv = {}) => {
+    system = await createApp(loadConfig({ APP_ORIGIN: origin, CALDAV_URL: 'https://dav.example.test/',
+      RATE_LIMIT_REQUESTS: '2', RATE_LIMIT_LOGINS: '1', ...env }));
+    system.app.get('/_rate-check', async request => ({ clientIp: request.ip }));
+    return system.app;
+  };
+  afterEach(async () => { await system?.app.close(); system = undefined; });
+
+  it('ignores forwarded client addresses when proxy trust is disabled', async () => {
+    const app = await start();
+    const request = (client: string) => app.inject({ url: '/_rate-check', remoteAddress: '192.0.2.1', headers: { 'x-forwarded-for': client } });
+    expect((await request('198.51.100.1')).statusCode).toBe(200);
+    expect((await request('198.51.100.2')).statusCode).toBe(200);
+    expect((await request('198.51.100.3')).statusCode).toBe(429);
+    expect((await app.inject({ url: '/healthz', remoteAddress: '192.0.2.1' })).statusCode).toBe(200);
+  });
+
+  it('gives clients behind an explicitly trusted proxy separate budgets', async () => {
+    const app = await start({ TRUSTED_PROXIES: '192.0.2.0/24' });
+    const request = (client: string) => app.inject({ url: '/_rate-check', remoteAddress: '192.0.2.1', headers: { 'x-forwarded-for': client } });
+    expect((await request('198.51.100.1')).statusCode).toBe(200);
+    expect((await request('198.51.100.1')).statusCode).toBe(200);
+    expect((await request('198.51.100.1')).statusCode).toBe(429);
+    expect((await request('198.51.100.2')).statusCode).toBe(200);
+  });
+
+  it('keeps requests from an untrusted peer in its direct IP budget', async () => {
+    const app = await start({ TRUSTED_PROXIES: '192.0.2.1' });
+    const request = (client: string) => app.inject({ url: '/_rate-check', remoteAddress: '203.0.113.1', headers: { 'x-forwarded-for': client } });
+    expect((await request('198.51.100.1')).statusCode).toBe(200);
+    expect((await request('198.51.100.2')).statusCode).toBe(200);
+    expect((await request('198.51.100.3')).statusCode).toBe(429);
+  });
+
+  it('stops client address resolution at the first untrusted proxy', async () => {
+    const app = await start({ TRUSTED_PROXIES: '192.0.2.1' });
+    const request = (client: string) => app.inject({ url: '/_rate-check', remoteAddress: '192.0.2.1', headers: { 'x-forwarded-for': `${client}, 203.0.113.1` } });
+    expect((await request('198.51.100.1')).statusCode).toBe(200);
+    expect((await request('198.51.100.2')).statusCode).toBe(200);
+    expect((await request('198.51.100.3')).statusCode).toBe(429);
+  });
+
+  it('enforces the configured login budget independently of the request budget', async () => {
+    const app = await start({ RATE_LIMIT_REQUESTS: '5' });
+    const login = () => app.inject({ method: 'POST', url: '/api/session', headers: { origin },
+      payload: { method: 'basic', username: 'invalid:name', password: 'test-password' } });
+    expect((await login()).statusCode).toBe(400);
+    expect((await login()).statusCode).toBe(429);
+    expect((await app.inject({ url: '/api/session' })).statusCode).toBe(401);
+  });
+
+  it.each(['true', '1', 'loopback', '0.0.0.0/0', '::/0', '192.0.2.1/33', '::1/129', '192.0.2.1,', '192.0.2.1/24/8'])('rejects invalid or unrestricted proxy trust %s', value => {
+    expect(() => loadConfig({ CALDAV_URL: 'https://dav.example.test/', TRUSTED_PROXIES: value })).toThrow('TRUSTED_PROXIES');
+  });
+
+  it('accepts explicit IPv4 and IPv6 proxy addresses and rejects disabled rate limits', () => {
+    const config = loadConfig({ CALDAV_URL: 'https://dav.example.test/', TRUSTED_PROXIES: '192.0.2.1, ::1, 2001:db8::/64' });
+    expect(config.trustedProxies).toEqual(['192.0.2.1', '::1', '2001:db8::/64']);
+    for (const key of ['RATE_LIMIT_REQUESTS', 'RATE_LIMIT_LOGINS']) {
+      expect(() => loadConfig({ CALDAV_URL: 'https://dav.example.test/', [key]: '0' })).toThrow();
+    }
+  });
+});
+
 const draft: EventDraft = { calendarId: '', title: 'Test', description: 'Private notes', location: '', start: '2026-10-04T09:00:00', end: '2026-10-04T10:00:00', allDay: false, timezone: 'Europe/Prague', reminder: 1440, recurrence: defaultRecurrence };
 describe('same-origin CalDAV API', () => {
   let dav: Awaited<ReturnType<typeof mockDav>>;

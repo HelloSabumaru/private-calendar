@@ -2,6 +2,8 @@ node_modules
 dist
 .git
 .env
+.env.*
+!.env.example
 .certs
 .interop
 playwright-report

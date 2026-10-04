@@ -8,7 +8,9 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "demo": "npm run build && npm run dev:certs && tsx tests/browser/server.ts",
+    "demo": "vite --mode demo --host 127.0.0.1 --port 4173",
+    "build:demo": "vite build --mode demo",
+    "preview:demo": "vite preview --mode demo --host 127.0.0.1 --port 4173",
     "dev": "tsx scripts/dev.ts",
     "dev:certs": "bash scripts/dev-certs.sh",
     "build": "tsc -p tsconfig.server.json && vite build",
@@ -17,6 +19,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:demo": "playwright test --config playwright.demo.config.ts",
     "test:interop": "bash scripts/interop.sh"
   },
   "dependencies": {

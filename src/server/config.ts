@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { isIP } from 'node:net';
 
 const bool = z.enum(['true', 'false']).default('false').transform(v => v === 'true');
 const envSchema = z.object({
@@ -9,6 +10,9 @@ const envSchema = z.object({
   SESSION_MAX_HOURS: z.coerce.number().int().min(1).max(168).default(8),
   MAX_SESSIONS: z.coerce.number().int().min(1).max(10000).default(100),
   UPSTREAM_TIMEOUT_MS: z.coerce.number().int().min(100).max(120000).default(15000),
+  RATE_LIMIT_REQUESTS: z.coerce.number().int().min(1).max(100000).default(120),
+  RATE_LIMIT_LOGINS: z.coerce.number().int().min(1).max(10000).default(10),
+  TRUSTED_PROXIES: z.string().default(''),
 });
 export type Config = ReturnType<typeof loadConfig>;
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
@@ -20,5 +24,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (upstream.protocol !== 'https:' && !(upstream.protocol === 'http:' && parsed.CALDAV_ALLOW_HTTP)) throw new Error('CalDAV requires HTTPS. Set CALDAV_ALLOW_HTTP=true only for a trusted private network.');
   const paths = (parsed.CALDAV_ALLOWED_PATHS ?? upstream.pathname).split(',').map(p => p.trim());
   if (paths.some(p => !p.startsWith('/') || p.includes('\\') || p.includes('%') || p.split('/').some(s => s === '.' || s === '..'))) throw new Error('Allowed paths must be absolute, unencoded path prefixes.');
-  return { ...parsed, APP_ORIGIN: origin.origin, CALDAV_URL: upstream.href, allowedPaths: paths };
+  const trustedProxies = parsed.TRUSTED_PROXIES.trim() ? parsed.TRUSTED_PROXIES.split(',').map(value => value.trim()) : [];
+  for (const proxy of trustedProxies) {
+    const [address, prefix, ...extra] = proxy.split('/');
+    const family = isIP(address);
+    if (!family || extra.length || (prefix !== undefined && (!/^\d{1,3}$/.test(prefix) || Number(prefix) < 1 || Number(prefix) > (family === 4 ? 32 : 128)))) {
+      throw new Error('TRUSTED_PROXIES must contain explicit IP addresses or CIDRs with a nonzero prefix.');
+    }
+  }
+  return { ...parsed, APP_ORIGIN: origin.origin, CALDAV_URL: upstream.href, allowedPaths: paths, trustedProxies };
 }
