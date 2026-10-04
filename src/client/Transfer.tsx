@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Calendar, ImportEvent, Operation } from '../shared';
 import { api, errorMessage, RequestError } from './api';
 import { Dialog } from './Dialog';
+import type { SessionBoundary } from './useSession';
 
 export function downloadICS(ics: string, name: string) {
   const url = URL.createObjectURL(new Blob([ics], { type: 'text/calendar;charset=utf-8' }));
@@ -11,12 +12,25 @@ export function downloadICS(ics: string, name: string) {
 }
 
 type Item = ImportEvent & { key: string; operation?: Operation; error?: string };
-export function Transfer({ mode, calendars, suspended, onChanged, onClose }: { mode: 'import' | 'export'; calendars: Calendar[]; suspended: boolean; onChanged: () => void; onClose: () => void }) {
+export function Transfer({ mode, calendars, suspended, boundary, onChanged, onClose }: { mode: 'import' | 'export'; calendars: Calendar[]; suspended: boolean; boundary: SessionBoundary; onChanged: () => void; onClose: () => void }) {
   const choices = calendars.filter(c => mode === 'export' || c.canCreate);
   const [calendarId, setCalendarId] = useState(choices[0]?.id ?? '');
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const generation = useRef(0);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    const unsubscribe = boundary.subscribe(() => { generation.current++; setBusy(false); });
+    return () => { mounted.current = false; generation.current++; unsubscribe(); };
+  }, [boundary]);
+  const capture = () => {
+    const ticket = boundary.capture();
+    if (!ticket || suspended) return;
+    const started = ++generation.current;
+    return () => mounted.current && started === generation.current && ticket.isCurrent();
+  };
   const pending = items.some(item => item.operation && ['pending', 'uncertain'].includes(item.operation.state));
   useEffect(() => {
     const guard = (event: BeforeUnloadEvent) => { if (busy || pending) event.preventDefault(); };
@@ -26,28 +40,37 @@ export function Transfer({ mode, calendars, suspended, onChanged, onClose }: { m
   const update = (key: string, changes: Partial<Item>) => setItems(previous => previous.map(item => item.key === key ? { ...item, ...changes } : item));
   async function preview(file?: File) {
     if (!file) return;
+    const isCurrent = capture();
+    if (!isCurrent) return;
     setItems([]); setError(''); setBusy(true);
     try {
       if (file.size > 200000) throw new Error('Choose an ICS file smaller than 200 kB.');
-      const result = await api<ImportEvent[]>('/import/preview', { method: 'POST', body: JSON.stringify({ ics: await file.text() }) });
-      setItems(result.map(item => ({ ...item, key: crypto.randomUUID() })));
-    } catch (error) { setError(error instanceof Error && !(error instanceof TypeError) ? error.message : errorMessage(error)); }
-    finally { setBusy(false); }
+      const ics = await file.text();
+      if (!isCurrent()) return;
+      const result = await api<ImportEvent[]>('/import/preview', { method: 'POST', body: JSON.stringify({ ics }) });
+      if (isCurrent()) setItems(result.map(item => ({ ...item, key: crypto.randomUUID() })));
+    } catch (error) { if (isCurrent()) setError(error instanceof Error && !(error instanceof TypeError) ? error.message : errorMessage(error)); }
+    finally { if (isCurrent()) setBusy(false); }
   }
   async function run() {
+    const isCurrent = capture();
+    if (!isCurrent) return;
     setBusy(true); setError('');
     try {
       if (mode === 'export') {
         const result = await api<{ ics: string }>(`/calendars/${calendarId}/export`);
+        if (!isCurrent()) return;
         downloadICS(result.ics, calendars.find(c => c.id === calendarId)?.name ?? 'calendar');
         onClose(); return;
       }
       for (const item of items) {
+        if (!isCurrent()) return;
         if (item.operation?.state === 'success') continue;
         try {
           let operation = item.operation;
           if (operation && ['pending', 'uncertain'].includes(operation.state)) {
             try { operation = await api<Operation>(`/operations/${operation.id}`); } catch (error) { if (error instanceof RequestError && error.status === 404) operation = undefined; else throw error; }
+            if (!isCurrent()) return;
             update(item.key, { operation });
             if (operation && ['pending', 'uncertain'].includes(operation.state)) break;
             if (operation?.state === 'success') { onChanged(); continue; }
@@ -55,16 +78,18 @@ export function Transfer({ mode, calendars, suspended, onChanged, onClose }: { m
           const id = operation?.id ?? item.key;
           update(item.key, { operation: { id, state: 'pending' }, error: undefined });
           operation = await api<Operation>('/import', { method: 'POST', headers: { 'Idempotency-Key': id }, body: JSON.stringify({ calendarId, ics: item.ics }) });
+          if (!isCurrent()) return;
           update(item.key, { operation, error: operation.error });
           if (operation.state === 'success') onChanged();
           else break;
         } catch (error) {
+          if (!isCurrent()) return;
           update(item.key, { error: errorMessage(error), operation: { id: item.operation?.id ?? item.key, state: error instanceof RequestError && error.status < 500 ? 'failed' : 'uncertain' } });
           break;
         }
       }
-    } catch (error) { setError(errorMessage(error)); }
-    finally { setBusy(false); }
+    } catch (error) { if (isCurrent()) setError(errorMessage(error)); }
+    finally { if (isCurrent()) setBusy(false); }
   }
   if (suspended) return null;
   return <Dialog title={mode === 'import' ? 'Import ICS' : 'Export calendar'} onClose={() => { if (!busy && !pending) onClose(); else setError('Check the pending import before closing.'); }}>

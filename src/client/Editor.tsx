@@ -7,9 +7,10 @@ import { reminderLabel } from './Preferences';
 import { Icon } from './Icon';
 import { DateField } from './DateField';
 import { downloadICS } from './Transfer';
+import type { SessionBoundary } from './useSession';
 
-type Props = { initial: EventDraft; detail?: EventDetail; calendars: Calendar[]; timezones: string[]; suspended: boolean; onSaved: () => void; onClose: () => void };
-export function Editor({ initial, detail, calendars, timezones, suspended, onSaved, onClose }: Props) {
+type Props = { initial: EventDraft; detail?: EventDetail; calendars: Calendar[]; timezones: string[]; suspended: boolean; boundary: SessionBoundary; onSaved: () => void; onClose: () => void };
+export function Editor({ initial, detail, calendars, timezones, suspended, boundary, onSaved, onClose }: Props) {
   const [draft, setDraft] = useState(initial);
   const [current, setCurrent] = useState(detail);
   const [busy, setBusy] = useState(false);
@@ -19,6 +20,28 @@ export function Editor({ initial, detail, calendars, timezones, suspended, onSav
   const [timezoneOpen, setTimezoneOpen] = useState(!!initial.startOffset || !!initial.endOffset);
   const creationId = useRef(crypto.randomUUID());
   const attemptedCalendar = useRef<string | undefined>(undefined);
+  const generation = useRef(0);
+  const mounted = useRef(false);
+  const currentOperation = useRef<Operation | undefined>(undefined);
+  const updateOperation = (value: Operation | undefined) => { currentOperation.current = value; setOperation(value); };
+  useEffect(() => {
+    mounted.current = true;
+    const unsubscribe = boundary.subscribe(() => {
+      generation.current++; setBusy(false);
+      if (currentOperation.current?.state === 'pending') {
+        const value = { ...currentOperation.current, state: 'uncertain' as const };
+        currentOperation.current = value; setOperation(value);
+        setError('The session changed while the outcome was being checked. Your draft is retained. Check status after signing in.');
+      }
+    });
+    return () => { mounted.current = false; generation.current++; unsubscribe(); };
+  }, [boundary]);
+  const capture = () => {
+    const ticket = boundary.capture();
+    if (!ticket || suspended) return;
+    const started = ++generation.current;
+    return () => mounted.current && started === generation.current && ticket.isCurrent();
+  };
   const dirty = JSON.stringify(draft) !== JSON.stringify(detail?.draft ?? initial);
   const pending = operation && ['pending', 'uncertain'].includes(operation.state);
   const writable = !current || current.canUpdate;
@@ -35,19 +58,22 @@ export function Editor({ initial, detail, calendars, timezones, suspended, onSav
     if (!dirty || window.confirm('Discard this unsaved draft?')) onClose();
   };
   const result = (value: Operation) => {
-    setOperation(value);
+    updateOperation(value);
     if (value.state === 'success') onSaved();
     else if (value.state === 'failed') setError(value.error ?? 'The save failed. Your draft is retained.');
     else setError('The server outcome is being checked. Your draft is retained; keep this window open.');
   };
   async function checkStatus() {
     if (!operation || busy) return;
+    const isCurrent = capture();
+    if (!isCurrent) return;
     setBusy(true);
-    try { result(await api<Operation>(`/operations/${operation.id}`)); }
+    try { const value = await api<Operation>(`/operations/${operation.id}`); if (isCurrent()) result(value); }
     catch (error) {
-      if (error instanceof RequestError && error.status === 404) { setOperation(undefined); setError('The session restarted. Retry safely against the same event identity.'); }
+      if (!isCurrent()) return;
+      if (error instanceof RequestError && error.status === 404) { updateOperation(undefined); setError('The session restarted. Retry safely against the same event identity.'); }
       else setError(errorMessage(error));
-    } finally { setBusy(false); }
+    } finally { if (isCurrent()) setBusy(false); }
   }
   useEffect(() => {
     if (!pending || busy || suspended) return;
@@ -57,31 +83,43 @@ export function Editor({ initial, detail, calendars, timezones, suspended, onSav
   const send = async (deleting = false) => {
     if (busy || pending) return;
     if (deleting && (!current || !window.confirm(current.recurrenceId ? 'Delete only this occurrence? Unsaved changes will be discarded.' : current.recurring ? 'Delete this entire series, including every exception? Unsaved changes will be discarded.' : 'Delete this event? Unsaved changes will be discarded.'))) return;
+    const isCurrent = capture();
+    if (!isCurrent) return;
     setError(''); setConflict(undefined); setBusy(true);
     const id = crypto.randomUUID(); attemptedCalendar.current = draft.calendarId;
-    setOperation({ id, state: 'pending' });
+    updateOperation({ id, state: 'pending' });
     try {
-      result(await api<Operation>(current ? `/events/${current.id}${current.recurrenceId ? `?${new URLSearchParams({ recurrenceId: current.recurrenceId })}` : ''}` : '/events', {
+      const value = await api<Operation>(current ? `/events/${current.id}${current.recurrenceId ? `?${new URLSearchParams({ recurrenceId: current.recurrenceId })}` : ''}` : '/events', {
         method: deleting ? 'DELETE' : current ? 'PATCH' : 'POST', body: deleting ? undefined : JSON.stringify(draft),
         headers: { 'Idempotency-Key': id, 'X-Event-ID': creationId.current, ...(current ? { 'If-Match': current.etag } : {}) },
-      }));
+      });
+      if (isCurrent()) result(value);
     } catch (error) {
-      if (error instanceof RequestError && error.status < 500) { setOperation(undefined); if (error.data.latest) setConflict(error.data.latest); }
-      else setOperation({ id, state: 'uncertain' });
+      if (!isCurrent()) return;
+      if (error instanceof RequestError && error.status < 500) { updateOperation(undefined); if (error.data.latest) setConflict(error.data.latest); }
+      else updateOperation({ id, state: 'uncertain' });
       if (error instanceof RequestError && error.data.code === 'DST_OVERLAP') setTimezoneOpen(true);
       setError(errorMessage(error));
-    } finally { setBusy(false); }
+    } finally { if (isCurrent()) setBusy(false); }
   };
   const reapply = () => {
     if (!conflict) return;
     const merged = { ...conflict.draft };
     for (const key of Object.keys(draft) as (keyof EventDraft)[]) if (key !== 'calendarId' && (!current || JSON.stringify(draft[key]) !== JSON.stringify(current.draft[key]))) Object.assign(merged, { [key]: draft[key] });
-    setCurrent(conflict); setDraft(merged); setConflict(undefined); setOperation(undefined); setError('Draft reapplied to the latest version. Review it before saving.');
+    setCurrent(conflict); setDraft(merged); setConflict(undefined); updateOperation(undefined); setError('Draft reapplied to the latest version. Review it before saving.');
+  };
+  const exportEvent = async () => {
+    const ticket = boundary.capture();
+    if (!current || !ticket) return;
+    const started = generation.current;
+    const isCurrent = () => mounted.current && started === generation.current && ticket.isCurrent();
+    try { const value = await api<{ ics: string }>(`/events/${current.id}/export`); if (isCurrent()) downloadICS(value.ics, draft.title); }
+    catch (error) { if (isCurrent()) setError(errorMessage(error)); }
   };
   if (suspended) return null;
   const saveLabel = current?.recurrenceId ? 'Save occurrence' : current?.recurring ? 'Save series' : 'Save event';
   return <Dialog title={current ? current.recurrenceId ? 'Edit occurrence' : current.recurring ? 'Edit series' : 'Edit event' : 'New event'} onClose={close} closeLabel="Cancel" actions={<>
-    {current && <button type="button" className="icon-button" aria-label="Export event" title="Export event" onClick={() => { void api<{ ics: string }>(`/events/${current.id}/export`).then(result => downloadICS(result.ics, draft.title)).catch(error => setError(errorMessage(error))); }}><Icon name="download" /></button>}
+    {current && <button type="button" className="icon-button" aria-label="Export event" title="Export event" onClick={() => { void exportEvent(); }}><Icon name="download" /></button>}
     {current?.canDelete && <button type="button" className="icon-button danger" aria-label={current.recurrenceId ? 'Delete occurrence' : current.recurring ? 'Delete series' : 'Delete event'} title="Delete" disabled={busy || !!pending} onClick={() => void send(true)}><Icon name="delete" /></button>}
     <button className="icon-button" type="submit" form="event-form" aria-label={saveLabel} title={saveLabel} disabled={locked || !!conflict}><Icon name={busy ? 'refresh' : 'save'} className={busy ? 'spinning' : undefined} /></button>
   </>}>

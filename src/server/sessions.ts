@@ -7,34 +7,63 @@ import type { Resource } from './ics.js';
 
 export type CalendarEntry = { calendar: Calendar; upstream: DAVCalendar };
 export type ResourceEntry = Resource & { url: string };
+export type ResourceLocation = Omit<ResourceEntry, 'ics'>;
 export type Mutation = Operation & {
-  fingerprint: string; url: string; method: 'PUT' | 'DELETE'; intended?: string; etag?: string; running?: Promise<void>;
+  resourceId: string; fingerprint: string; url: string; method: 'PUT' | 'DELETE'; intended?: string; etag?: string; running?: Promise<void>;
 };
 export type Session = {
   id: string; csrf: string; accountKey: string; client: DAVClient; fetch: typeof fetch; abort: AbortController;
   created: number; touched: number; calendars: Map<string, CalendarEntry>; resources: Map<string, ResourceEntry>;
+  resourceLocations: Map<string, ResourceLocation>; resourceLocationBytes: number;
   operations: Map<string, Mutation>; locks: Set<string>; cacheBytes: number;
 };
 
 const liveSessions = new Set<Session>();
 let cacheBytes = 0;
+let resourceLocationBytes = 0;
+let resourceLocationCount = 0;
 const size = (source: string) => Buffer.byteLength(source);
-export function discardResource(session: Session, id: string) {
+const locationSize = (resource: ResourceLocation) => size(resource.id) + size(resource.calendarId) + size(resource.url) + size(resource.etag);
+function discardCachedResource(session: Session, id: string) {
   const resource = session.resources.get(id);
   if (!resource) return;
   const bytes = size(resource.ics);
   session.resources.delete(id); session.cacheBytes -= bytes; cacheBytes -= bytes;
 }
+export function discardResource(session: Session, id: string) {
+  discardCachedResource(session, id);
+  const location = session.resourceLocations.get(id);
+  if (!location) return;
+  const bytes = locationSize(location);
+  session.resourceLocations.delete(id); session.resourceLocationBytes -= bytes; resourceLocationBytes -= bytes; resourceLocationCount--;
+}
 function evictResource(session: Session) {
   const id = session.resources.keys().next().value;
   if (!id) return false;
-  discardResource(session, id); return true;
+  discardCachedResource(session, id); return true;
+}
+export function retainResourceLocation(session: Session, resource: ResourceLocation) {
+  if (session.abort.signal.aborted) throw new ApiError(401, 'SESSION_EXPIRED', 'Your session ended. Sign in again.');
+  if (!session.calendars.has(resource.calendarId)) throw new ApiError(404, 'CALENDAR_MISSING', 'This calendar is no longer available.');
+  const previous = session.resourceLocations.get(resource.id);
+  const bytes = locationSize(resource), previousBytes = previous ? locationSize(previous) : 0;
+  // Locations survive ICS eviction and cover repeated ranges, including year-long searches.
+  if (size(resource.url) > 4096 || size(resource.etag) > 1024 ||
+      (!previous && (session.resourceLocations.size >= 20000 || resourceLocationCount >= 100000)) ||
+      session.resourceLocationBytes - previousBytes + bytes > 16 * 1024 * 1024 || resourceLocationBytes - previousBytes + bytes > 64 * 1024 * 1024) {
+    throw new ApiError(503, 'RESOURCE_LOCATION_LIMIT', 'Too many event locations are retained. Sign in again before loading more events.');
+  }
+  const location = { id: resource.id, calendarId: resource.calendarId, url: resource.url, etag: resource.etag };
+  session.resourceLocations.set(resource.id, location);
+  session.resourceLocationBytes += bytes - previousBytes; resourceLocationBytes += bytes - previousBytes;
+  if (!previous) resourceLocationCount++;
 }
 export function retainResource(session: Session, resource: ResourceEntry) {
   if (session.abort.signal.aborted) throw new ApiError(401, 'SESSION_EXPIRED', 'Your session ended. Sign in again.');
   const bytes = size(resource.ics);
   if (bytes > 1024 * 1024) throw new ApiError(422, 'ICS_LIMIT', 'This event exceeds the resource size limit.');
-  discardResource(session, resource.id);
+  retainResourceLocation(session, resource);
+  discardCachedResource(session, resource.id);
   session.resources.set(resource.id, resource); session.cacheBytes += bytes; cacheBytes += bytes;
   while (session.resources.size > 2000 || session.cacheBytes > 8 * 1024 * 1024) evictResource(session);
   while (cacheBytes > 64 * 1024 * 1024) {
@@ -54,9 +83,11 @@ export function retainOperation(session: Session, operation: Mutation) {
 export class SessionStore {
   private entries = new Map<string, Session>();
   constructor(private config: Config) {}
-  add(session: Session) {
+  add(session: Session, replacingId?: string) {
     this.sweep();
-    if (this.entries.size >= this.config.MAX_SESSIONS) throw new ApiError(503, 'SESSION_LIMIT', 'Too many active sessions. Try again later.');
+    const replacing = replacingId !== undefined && this.entries.has(replacingId);
+    if (this.entries.size - Number(replacing) >= this.config.MAX_SESSIONS) throw new ApiError(503, 'SESSION_LIMIT', 'Too many active sessions. Try again later.');
+    this.remove(replacingId);
     this.entries.set(session.id, session);
     liveSessions.add(session);
   }
@@ -76,7 +107,8 @@ export class SessionStore {
     session.abort.abort(); session.client.credentials = {}; session.client.authHeaders = undefined;
     if (session.client.account) session.client.account.credentials = {};
     cacheBytes -= session.cacheBytes; session.cacheBytes = 0; liveSessions.delete(session);
-    session.calendars.clear(); session.resources.clear(); session.operations.clear(); session.locks.clear();
+    resourceLocationBytes -= session.resourceLocationBytes; session.resourceLocationBytes = 0; resourceLocationCount -= session.resourceLocations.size;
+    session.calendars.clear(); session.resources.clear(); session.resourceLocations.clear(); session.operations.clear(); session.locks.clear();
     this.entries.delete(session.id);
   }
   sweep() {

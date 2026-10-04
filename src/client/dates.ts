@@ -11,13 +11,50 @@ export function monthDays(date: string, firstWeekday: number) {
   return Array.from({ length: 42 }, (_, index) => start.add({ days: index }).toString());
 }
 export const midnight = (date: string, timezone: string) => Temporal.PlainDate.from(date).toZonedDateTime(timezone).toInstant().toString();
-export function eventDay(instant: string, timezone: string) { return Temporal.Instant.from(instant).toZonedDateTimeISO(timezone).toPlainDate().toString(); }
-export function dayEvents(events: Occurrence[], date: string, timezone: string) {
-  return events.filter(event => {
-    const start = event.allDay ? event.start : eventDay(event.start, timezone);
-    const end = event.allDay ? event.end : eventDay(event.end, timezone);
-    return date >= start && (event.allDay ? date < end : date <= end && (date === start || Date.parse(event.end) > Date.parse(midnight(date, timezone))));
-  }).sort((a, b) => Number(b.allDay) - Number(a.allDay) || a.start.localeCompare(b.start));
+export type TimedEvent = { event: Occurrence; start: number; end: number };
+export type DayEvents = { events: readonly Occurrence[]; allDay: readonly Occurrence[]; timed: readonly TimedEvent[] };
+export function groupEventsByDate(events: readonly Occurrence[], timezone: string, start: string, end: string): ReadonlyMap<string, DayEvents> {
+  const groups = new Map<string, { events: Occurrence[]; allDay: Occurrence[]; timed: TimedEvent[] }>();
+  for (let date = Temporal.PlainDate.from(start); date.toString() < end; date = date.add({ days: 1 })) {
+    groups.set(date.toString(), { events: [], allDay: [], timed: [] });
+  }
+  const dates = [...groups.keys()];
+  if (!dates.length) return groups;
+  const indices = new Map(dates.map((date, index) => [date, index]));
+  const dayStarts = new Map<string, bigint>();
+  const dayStart = (date: string) => {
+    let instant = dayStarts.get(date);
+    if (instant === undefined) {
+      instant = Temporal.PlainDate.from(date).toZonedDateTime(timezone).epochNanoseconds;
+      dayStarts.set(date, instant);
+    }
+    return instant;
+  };
+  const ordered = [...events].sort((a, b) => Number(b.allDay) - Number(a.allDay) || a.start.localeCompare(b.start));
+  for (const event of ordered) {
+    let startDay = event.start, endDay = event.end, startMinutes = 0, endMinutes = 1440, endInstant = 0n;
+    if (!event.allDay) {
+      const first = Temporal.Instant.from(event.start).toZonedDateTimeISO(timezone);
+      const last = Temporal.Instant.from(event.end).toZonedDateTimeISO(timezone);
+      startDay = first.toPlainDate().toString(); endDay = last.toPlainDate().toString();
+      startMinutes = first.hour * 60 + first.minute; endMinutes = last.hour * 60 + last.minute;
+      endInstant = last.epochNanoseconds;
+    }
+    const firstDay = startDay < start ? start : startDay;
+    const lastDay = endDay > dates[dates.length - 1] ? dates[dates.length - 1] : endDay;
+    if (firstDay > lastDay) continue;
+    const firstIndex = indices.get(firstDay), lastIndex = indices.get(lastDay);
+    if (firstIndex === undefined || lastIndex === undefined) continue;
+    for (let index = firstIndex; index <= lastIndex; index++) {
+      const date = dates[index];
+      if (event.allDay ? date >= endDay : date !== startDay && endInstant <= dayStart(date)) continue;
+      const group = groups.get(date)!;
+      group.events.push(event);
+      if (event.allDay) group.allDay.push(event);
+      else group.timed.push({ event, start: startDay < date ? 0 : startMinutes, end: endDay > date ? 1440 : endMinutes });
+    }
+  }
+  return groups;
 }
 export const monthLabel = (date: string) => new Intl.DateTimeFormat('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T12:00:00Z`));
 export const dateLabel = (date: string) => new Intl.DateTimeFormat('en-GB', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' }).format(new Date(`${date}T12:00:00Z`));
