@@ -8,7 +8,7 @@ RUN npm run typecheck && npm run build && npm prune --omit=dev
 FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=6742
 WORKDIR /app
-COPY --from=build --chown=node:node /app/package.json ./
+COPY --from=build --chown=node:node /app/package.json /app/LICENSE ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/data ./data

@@ -104,3 +104,7 @@ docker compose up -d
 Check `/healthz` and sign in again. Back up data on CalDAV. To roll back, restore the previous source and lockfile, then rebuild.
 
 Dependencies and the container base are pinned. Timezone data is IANA **2026e**; regenerate it with `bash scripts/update-timezones.sh` (requires a C compiler, make, GLib development files, Git, curl, and Python). For a new release, update the script's release/checksum and the Node.js base to keep ICU rules current.
+
+## License
+
+[MIT](LICENSE). Third-party dependencies retain their own licenses; browser notices are in [public/third-party-licenses.txt](public/third-party-licenses.txt).
