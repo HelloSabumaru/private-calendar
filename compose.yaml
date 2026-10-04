@@ -1,0 +1,11 @@
+services:
+  calendar:
+    build: .
+    env_file: .env
+    ports:
+      - "127.0.0.1:6742:6742"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ ALL ]
+    security_opt: [ no-new-privileges:true ]

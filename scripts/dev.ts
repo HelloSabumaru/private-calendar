@@ -1,0 +1,10 @@
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+if (existsSync('.env')) process.loadEnvFile('.env');
+if (!existsSync('.certs/localhost.pem')) throw new Error('Run npm run dev:certs first.');
+const env = { ...process.env, APP_ORIGIN: process.env.APP_ORIGIN ?? 'https://localhost:5173', CALENDAR_DEV: 'true' };
+const children = [spawn('node_modules/.bin/tsx', ['watch', 'src/server/index.ts'], { stdio: 'inherit', env }), spawn('node_modules/.bin/vite', [], { stdio: 'inherit', env })];
+let stopping = false;
+const stop = () => { if (stopping) return; stopping = true; children.forEach(child => child.kill('SIGTERM')); };
+process.on('SIGINT', stop); process.on('SIGTERM', stop);
+for (const child of children) child.on('exit', code => { if (!stopping && code) process.exitCode = code; stop(); });

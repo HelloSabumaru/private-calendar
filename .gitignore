@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.certs/
+playwright-report/
+blob-report/
+playwright/.cache/
+test-results/
+.interop/
+coverage/
+*.log
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
