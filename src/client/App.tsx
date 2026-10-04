@@ -108,7 +108,6 @@ export function App() {
         <span className="sr-only" role="status">{refreshLabel}</span>
       </header>
       <main id="calendar-main" className="main" tabIndex={-1}>
-        {isDemo && <p className="empty-state">Sample calendar. Changes reset when you reload.</p>}
         <div className="month-navigation">
           <button className="icon-button" aria-label={`Previous ${view === 'agenda' ? 'month' : view}`} title="Previous" onClick={() => navigate(-1)}><Icon name="left" /></button>
           <div className="month-picker"><h1 aria-label={periodLabel}><button aria-label="Choose date" onClick={() => { setJumpDate(date); setDateOpen(true); }}>{periodLabel}<Icon name="down" /></button></h1></div>

@@ -6,18 +6,7 @@ Includes month/week/day/agenda views, search, event and occurrence editing, drag
 
 ## Try the demo
 
-The demo runs entirely in your browser, with sample events around today and no account. Edits reset on reload; preferences persist in this browser.
-
-To run it locally, use Node.js 22.12 or later and npm:
-
-```bash
-npm ci --include=dev
-npm run demo
-```
-
-Open **http://127.0.0.1:4173**. Ctrl+C stops the local preview.
-
-`npm run build:demo` creates `dist/demo`, which can also be served by any static host. Use `npm run preview:demo` to preview that build locally. Connecting to a real CalDAV account requires the server deployment below.
+[Open the demo](https://hellosabumaru.github.io/private-calendar/). No account needed; changes reset on reload.
 
 ## Deploy with Docker
 
@@ -47,7 +36,7 @@ For a proxy on the same Docker network, use `calendar:6742`. Frontend and API mu
 
 For a private CalDAV CA, mount its PEM file readable by container UID **65532** and set `NODE_EXTRA_CA_CERTS` to that path. `CALDAV_ALLOW_HTTP=true` permits a trusted HTTP upstream; browser access still requires HTTPS. See [.env.example](.env.example) for other settings.
 
-To use a published release, set `CALENDAR_IMAGE=ghcr.io/hellosabumaru/calendar:<version>` in `.env`, replacing `<version>` with a release tag, then run `docker compose up -d --no-build --pull always`. Release images support AMD64 and ARM64. Compose limits the container to 1 GiB of memory, two CPUs, and 128 processes; adjust these limits for your host and workload.
+To use a published release, set `CALENDAR_IMAGE=ghcr.io/hellosabumaru/private-calendar:<version>` in `.env`, replacing `<version>` with a release tag, then run `docker compose up -d --no-build --pull always`. Release images support AMD64 and ARM64. Compose limits the container to 1 GiB of memory, two CPUs, and 128 processes; adjust these limits for your host and workload.
 
 The runtime contains Node.js and application dependencies, without a shell or package managers. Run one application instance; sessions and pending operation status live in memory. After a restart, sign in and inspect the calendar before retrying an uncertain write.
 

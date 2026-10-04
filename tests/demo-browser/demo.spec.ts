@@ -14,7 +14,6 @@ test.beforeEach(async ({ page, context }) => {
 
 test('loads from a Pages subpath without login or API requests and supports views', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toHaveCount(0);
-  await expect(page.getByText('Sample calendar. Changes reset when you reload.')).toBeVisible();
   for (const view of ['Week', 'Day', 'Agenda', 'Month']) {
     await page.getByRole('button', { name: view, exact: true }).click();
     await expect(page.getByRole('button', { name: /Morning walk/ }).first()).toBeVisible();
