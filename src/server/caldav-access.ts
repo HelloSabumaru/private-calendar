@@ -3,7 +3,6 @@ import type { EventDetail, EventDraft } from '../shared.js';
 import type { Config } from './config.js';
 import { ApiError } from './errors.js';
 import { Diagnostics } from './diagnostics.js';
-import { runICS } from './jobs.js';
 import { retainResource, type CalendarEntry, type Mutation, type ResourceEntry, type ResourceLocation, type Session } from './sessions.js';
 import { allowedUrl } from './transport.js';
 
@@ -59,7 +58,7 @@ export class CalDavAccess {
   async prepare(command: MutationCommand, location: ResourceLocation, remembered?: string): Promise<PreparedMutation> {
     if (command.kind === 'create' || command.kind === 'import') {
       const resource = { ...location, ics: '' };
-      const intended = remembered ?? (command.kind === 'import' ? command.ics : await this.diagnostics.run('event-serialize', 'ics-processing', () => runICS({ kind: 'write', draft: command.draft, uid: `${command.creationId}@private-calendar` })));
+      const intended = remembered ?? (command.kind === 'import' ? command.ics : await this.diagnostics.run('event-serialize', 'ics-processing', () => this.session.jobs.run({ kind: 'write', draft: command.draft, uid: `${command.creationId}@private-calendar` })));
       // Reserve metadata before registering the pending operation.
       retainResource(this.session, resource);
       return { mode: 'create', method: 'PUT', resource, filename: `${command.creationId}.ics`, intended, collision: command.kind === 'import' ? 'skip' : 'compare' };
@@ -74,8 +73,8 @@ export class CalDavAccess {
     }
     if (command.kind === 'delete') return { mode: 'delete', method: 'DELETE', resource, etag: command.etag };
     const intended = remembered ?? (command.kind === 'update' ?
-      await this.diagnostics.run('event-serialize', 'ics-processing', () => runICS({ kind: 'write', draft: command.draft, uid: '', original: resource.ics })) :
-      await this.diagnostics.run('occurrence-serialize', 'ics-processing', () => runICS({ kind: 'occurrence', resource, recurrenceId: command.recurrenceId, draft: command.kind === 'update-occurrence' ? command.draft : undefined })));
+      await this.diagnostics.run('event-serialize', 'ics-processing', () => this.session.jobs.run({ kind: 'write', draft: command.draft, uid: '', original: resource.ics })) :
+      await this.diagnostics.run('occurrence-serialize', 'ics-processing', () => this.session.jobs.run({ kind: 'occurrence', resource, recurrenceId: command.recurrenceId, draft: command.kind === 'update-occurrence' ? command.draft : undefined })));
     return { mode: 'update', method: 'PUT', resource, etag: command.etag, intended };
   }
 
@@ -96,9 +95,15 @@ export class CalDavAccess {
 
   inspect(operation: Mutation) {
     return this.diagnostics.inspect(async () => {
-      const resource = this.access.resource(this.session, operation.resourceId);
-      if (resource.url !== operation.url) throw new ApiError(404, 'EVENT_MISSING', 'This event is no longer available.');
-      return this.session.fetch(resource.url, { method: 'GET' });
+      // Operation authority survives resource invalidation, but never calendar revocation.
+      const calendar = this.access.calendar(this.session, operation.calendarId);
+      const url = allowedUrl(operation.url, this.config);
+      const collection = new URL(calendar.upstream.url);
+      const path = collection.pathname.endsWith('/') ? collection.pathname : `${collection.pathname}/`;
+      if (url.origin !== collection.origin || !url.pathname.startsWith(path)) throw new ApiError(404, 'EVENT_MISSING', 'This event is no longer available.');
+      const response = await this.session.fetch(url.href, { method: 'GET' });
+      this.access.calendar(this.session, operation.calendarId);
+      return response;
     }, operation.method === 'DELETE');
   }
 

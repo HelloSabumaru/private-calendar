@@ -5,8 +5,7 @@ import type { Config } from './config.js';
 import { ApiError } from './errors.js';
 import { Diagnostics } from './diagnostics.js';
 import { allowedUrl, createTransport } from './transport.js';
-import { opaque, discardResource, retainResource, type CalendarEntry, type Mutation, type ResourceEntry, type ResourceLocation, type Session } from './sessions.js';
-import { runICS } from './jobs.js';
+import { opaque, discardResource, retainResource, type CalendarEntry, type Mutation, type ResourceEntry, type ResourceLocation, type Session, type SessionStore } from './sessions.js';
 import { CalDavAccess, type MutationCommand } from './caldav-access.js';
 import { operationTracker } from './operations.js';
 export { publicOperation } from './operations.js';
@@ -14,7 +13,7 @@ export { publicOperation } from './operations.js';
 const hash = (input: string) => createHash('sha256').update(input).digest('base64url');
 const strongETag = (etag: string) => /^"[^"\r\n]+"$/.test(etag);
 
-export async function authenticate(config: Config, login: Login, baseFetch: typeof fetch = fetch, diagnostics = new Diagnostics()): Promise<Session> {
+export async function authenticate(config: Config, login: Login, services: Pick<SessionStore, 'cache' | 'jobs'>, baseFetch: typeof fetch = fetch, diagnostics = new Diagnostics()): Promise<Session> {
   const isBasic = login.method === 'basic';
   const abort = new AbortController();
   const transport = createTransport(config, baseFetch);
@@ -31,7 +30,7 @@ export async function authenticate(config: Config, login: Login, baseFetch: type
     const authorizedFetch: typeof fetch = (input, init) => guardedFetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)),
       Authorization: isBasic ? `Basic ${Buffer.from(`${client.credentials.username}:${client.credentials.password}`).toString('base64')}` : `Bearer ${client.credentials.accessToken}` } });
     const now = Date.now();
-    const session: Session = { id: opaque(), csrf: opaque(), accountKey: hash(`${config.CALDAV_URL}\0${client.account?.principalUrl ?? (login.method === 'basic' ? login.username : 'token-user')}`),
+    const session: Session = { cache: services.cache, jobs: services.jobs, id: opaque(), csrf: opaque(), accountKey: hash(`${config.CALDAV_URL}\0${client.account?.principalUrl ?? (login.method === 'basic' ? login.username : 'token-user')}`),
       client, fetch: authorizedFetch, abort, created: now, touched: now, calendars: new Map(), resources: new Map(), resourceLocations: new Map(), resourceLocationBytes: 0, operations: new Map(), locks: new Set(), cacheBytes: 0 };
     await discover(session, config, diagnostics);
     return session;
@@ -112,7 +111,7 @@ export async function readRange(session: Session, config: Config, calendarIds: s
       warnings.push(`${entry.calendar.name}: ${error instanceof ApiError ? error.message : 'Could not refresh this calendar.'}`);
     }
   }
-  const result = await diagnostics.run('range-expand', 'ics-processing', () => runICS({ kind: 'expand', resources, start, end, timezone }));
+  const result = await diagnostics.run('range-expand', 'ics-processing', () => session.jobs.run({ kind: 'expand', resources, start, end, timezone }));
   const eventWarnings = result.warnings.map(warning => {
     const resource = resources.find(r => warning.startsWith(`${r.id}:`));
     return resource ? `${getCalendar(session, resource.calendarId).calendar.name}${warning.slice(resource.id.length)}` : warning;
@@ -124,7 +123,11 @@ export async function fetchResource(session: Session, resource: ResourceLocation
   return diagnostics.run('resource-read', 'upstream-transport', async () => {
     const location = getResource(session, resource.id);
     const response = await session.fetch(location.url, { method: 'GET' });
-    if (response.status === 404) { discardResource(session, location.id); throw new ApiError(404, 'EVENT_MISSING', 'This event was deleted on the server.'); }
+    if (response.status === 404) {
+      getResource(session, location.id);
+      operationTracker(session).confirmAbsence(location);
+      throw new ApiError(404, 'EVENT_MISSING', 'This event was deleted on the server.');
+    }
     if (response.status === 403) { discardResource(session, location.id); throw new ApiError(403, 'PERMISSION', 'The server denied access to this event.'); }
     if (!response.ok) throw new ApiError(502, 'UPSTREAM', 'The CalDAV server could not read this event.', { retryable: true });
     const latest = { ...location, ics: await response.text(), etag: response.headers.get('etag') ?? '' };
@@ -134,7 +137,7 @@ export async function fetchResource(session: Session, resource: ResourceLocation
 }
 
 export async function detail(session: Session, resource: ResourceEntry, recurrenceId?: string, diagnostics = new Diagnostics()) {
-  const result = await diagnostics.run('event-detail', 'ics-processing', () => runICS({ kind: 'detail', resource, recurrenceId }));
+  const result = await diagnostics.run('event-detail', 'ics-processing', () => session.jobs.run({ kind: 'detail', resource, recurrenceId }));
   const { calendar } = getCalendar(session, resource.calendarId);
   return { ...result, canUpdate: result.canUpdate && calendar.canUpdate && strongETag(resource.etag), canDelete: result.canDelete && (recurrenceId ? calendar.canUpdate : calendar.canDelete) && strongETag(resource.etag) };
 }
@@ -166,12 +169,12 @@ export async function exportCalendar(session: Session, config: Config, calendarI
       if (bytes > 16 * 1024 * 1024) throw new ApiError(422, 'EXPORT_LIMIT', 'This calendar exceeds the export size limit.');
       return object.data;
     });
-    return { ics: await diagnostics.run('export-serialize', 'ics-processing', () => runICS({ kind: 'export', documents })) };
+    return { ics: await diagnostics.run('export-serialize', 'ics-processing', () => session.jobs.run({ kind: 'export', documents })) };
   });
 }
 export async function importEvent(session: Session, config: Config, operationId: string, calendarId: string, ics: string, diagnostics = new Diagnostics()) {
   diagnostics.operation(operationId);
-  const entries = await diagnostics.run('import-parse', 'ics-processing', () => runICS({ kind: 'import', ics }));
+  const entries = await diagnostics.run('import-parse', 'ics-processing', () => session.jobs.run({ kind: 'import', ics }));
   if (entries.length !== 1) throw new ApiError(422, 'IMPORT_INVALID', 'Import one event series per operation.');
   const digest = createHash('sha256').update(entries[0].uid).digest('hex');
   const identity = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;

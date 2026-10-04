@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { createApp } from '../src/server/app.js';
 import { loadConfig } from '../src/server/config.js';
 import { writeEvent } from '../src/server/ics.js';
-import { retainResourceLocation } from '../src/server/sessions.js';
+import { discardResource, retainResourceLocation } from '../src/server/sessions.js';
 import { defaultRecurrence, type Calendar, type EventDetail, type EventDraft } from '../src/shared.js';
 import { mockDav } from './dav-server.js';
 
@@ -136,6 +136,89 @@ describe('mutation commands and operation tracking', () => {
     expect(dav.requests.filter(request => request.method === 'DELETE')).toHaveLength(1);
   });
 
+  it.each(['', '/export'])('settles an uncertain deletion when an intervening event%s read confirms absence', async suffix => {
+    const resourceId = (await create()).json().resourceId, original = await read(resourceId), current = session();
+    const operationId = randomUUID(); dav.state.mode = 'unavailable-after-put';
+    expect((await change('DELETE', original, undefined, operationId)).json().state).toBe('uncertain');
+    dav.state.unavailable = false;
+    const missing = await system.app.inject({ url: `/api/events/${resourceId}${suffix}`, headers: headers() });
+    expect(missing.statusCode, missing.body).toBe(404);
+    expect(current.resourceLocations.has(resourceId)).toBe(false);
+    expect(current.operations.get(operationId)?.state).toBe('success');
+    const status = await system.app.inject({ url: `/api/operations/${operationId}`, headers: headers() });
+    expect(status.json().state, status.body).toBe('success');
+    expect((await change('DELETE', original, undefined, operationId)).json().state).toBe('success');
+    expect(dav.requests.filter(request => request.method === 'DELETE')).toHaveLength(1);
+  });
+
+  it('reconciles a lost DELETE response after a concurrent read has invalidated its location', async () => {
+    const resourceId = (await create()).json().resourceId, original = await read(resourceId), current = session();
+    const operationId = randomUUID(), entered = deferred(), release = deferred();
+    const remove = current.client.deleteCalendarObject.bind(current.client);
+    vi.spyOn(current.client, 'deleteCalendarObject').mockImplementation(async options => {
+      try { return await remove(options); }
+      catch (error) { entered.resolve(); await release.promise; throw error; }
+    });
+    dav.state.mode = 'unavailable-after-put';
+    const pending = change('DELETE', original, undefined, operationId).then(response => response);
+    await entered.promise;
+    try {
+      dav.state.unavailable = false;
+      expect(current.operations.get(operationId)?.state).toBe('pending');
+      expect((await system.app.inject({ url: `/api/events/${resourceId}`, headers: headers() })).statusCode).toBe(404);
+      expect(current.resourceLocations.has(resourceId)).toBe(false);
+    } finally { release.resolve(); }
+    const removed = await pending;
+    expect(removed.json().state, removed.body).toBe('success');
+    expect(dav.requests.filter(request => request.method === 'DELETE')).toHaveLength(1);
+  });
+
+  it('keeps access denial uncertain and later reconciles using the operation location', async () => {
+    const resourceId = (await create()).json().resourceId, original = await read(resourceId), current = session();
+    const operationId = randomUUID(); dav.state.mode = 'unavailable-after-put';
+    expect((await change('DELETE', original, undefined, operationId)).json().state).toBe('uncertain');
+    dav.state.unavailable = false;
+    const originalFetch = current.fetch;
+    current.fetch = async () => new Response(null, { status: 403 });
+    expect((await system.app.inject({ url: `/api/events/${resourceId}`, headers: headers() })).statusCode).toBe(403);
+    expect(current.resourceLocations.has(resourceId)).toBe(false);
+    expect((await system.app.inject({ url: `/api/operations/${operationId}`, headers: headers() })).json().state).toBe('uncertain');
+    current.fetch = originalFetch;
+    expect((await system.app.inject({ url: `/api/operations/${operationId}`, headers: headers() })).json().state).toBe('success');
+    expect(dav.requests.filter(request => request.method === 'DELETE')).toHaveLength(1);
+  });
+
+  it('does not inspect a retained operation after its calendar is revoked', async () => {
+    const resourceId = (await create()).json().resourceId, original = await read(resourceId), current = session();
+    const operationId = randomUUID(); dav.state.mode = 'unavailable-after-put';
+    expect((await change('DELETE', original, undefined, operationId)).json().state).toBe('uncertain');
+    dav.state.unavailable = false; discardResource(current, resourceId); current.calendars.delete(calendar.id);
+    const before = dav.requests.length;
+    expect((await system.app.inject({ url: `/api/operations/${operationId}`, headers: headers() })).json().state).toBe('uncertain');
+    expect(dav.requests).toHaveLength(before);
+  });
+
+  it('does not let an older status response undo confirmed deletion', async () => {
+    const resourceId = (await create()).json().resourceId, original = await read(resourceId), current = session();
+    const operationId = randomUUID(); dav.state.mode = 'unavailable-after-put';
+    expect((await change('DELETE', original, undefined, operationId)).json().state).toBe('uncertain');
+    dav.state.unavailable = false;
+    const entered = deferred(), release = deferred(), originalFetch = current.fetch;
+    let held = false;
+    current.fetch = async (input, init) => {
+      if (!held) { held = true; entered.resolve(); await release.promise; return new Response(null, { status: 200 }); }
+      return originalFetch(input, init);
+    };
+    const pending = system.app.inject({ url: `/api/operations/${operationId}`, headers: headers() }).then(response => response);
+    await entered.promise;
+    try {
+      expect((await system.app.inject({ url: `/api/events/${resourceId}`, headers: headers() })).statusCode).toBe(404);
+      expect(current.operations.get(operationId)?.state).toBe('success');
+    } finally { release.resolve(); }
+    const status = await pending;
+    expect(status.json().state, status.body).toBe('success');
+  });
+
   it('uses update permission for occurrence cancellation and preserves series authority', async () => {
     dav.objects.set('/u/calendar/series.ics', writeEvent({ ...draft, recurrence: { ...defaultRecurrence, frequency: 'DAILY', end: 'count', count: 3 } }, 'series'));
     const occurrences = await load(), occurrence = occurrences[1];
@@ -154,6 +237,18 @@ describe('mutation commands and operation tracking', () => {
     expect(denied.statusCode).toBe(403);
     const remaining = await load(); expect(remaining).toHaveLength(2);
     expect(whole.draft.title).toBe('Original');
+  });
+
+  it('does not treat a missing series as successful reconciliation of an occurrence cancellation', async () => {
+    dav.objects.set('/u/calendar/series.ics', writeEvent({ ...draft, recurrence: { ...defaultRecurrence, frequency: 'DAILY', end: 'count', count: 3 } }, 'series'));
+    const occurrence = (await load())[1], original = await read(occurrence.resourceId, occurrence.recurrenceId);
+    const operationId = randomUUID(); dav.state.mode = 'unavailable-after-put';
+    expect((await change('DELETE', original, undefined, operationId)).json().state).toBe('uncertain');
+    dav.state.unavailable = false; dav.objects.clear();
+    expect((await system.app.inject({ url: `/api/events/${occurrence.resourceId}`, headers: headers() })).statusCode).toBe(404);
+    expect(session().operations.get(operationId)?.state).toBe('uncertain');
+    expect((await system.app.inject({ url: `/api/operations/${operationId}`, headers: headers() })).json().state).toBe('failed');
+    expect(dav.requests.filter(request => request.method === 'DELETE')).toHaveLength(0);
   });
 
   it('requires creation privilege for imports and strong ETags and a fixed calendar for edits', async () => {
@@ -200,7 +295,7 @@ describe('mutation commands and operation tracking', () => {
   it('bounds unresolved operations and reclaims a completed entry for a new command', async () => {
     const current = session();
     for (let i = 0; i < 200; i++) {
-      const id = randomUUID(); current.operations.set(id, { id, resourceId: `pending-${i}`, state: 'uncertain', fingerprint: 'pending',
+      const id = randomUUID(); current.operations.set(id, { id, resourceId: `pending-${i}`, calendarId: calendar.id, state: 'uncertain', fingerprint: 'pending',
         method: 'DELETE', url: new URL(`u/calendar/pending-${i}.ics`, dav.url).href });
     }
     const limited = await create();

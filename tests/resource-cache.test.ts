@@ -4,7 +4,7 @@ import { createApp } from '../src/server/app.js';
 import { loadConfig } from '../src/server/config.js';
 import { discover, fetchResource, getResource } from '../src/server/dav.js';
 import { writeEvent } from '../src/server/ics.js';
-import { discardResource, opaque, retainResource, retainResourceLocation, type Session } from '../src/server/sessions.js';
+import { discardResource, opaque, retainOperation, retainResource, retainResourceLocation, type Session } from '../src/server/sessions.js';
 import { defaultRecurrence, type Calendar, type EventDetail, type EventDraft } from '../src/shared.js';
 import { mockDav } from './dav-server.js';
 
@@ -37,6 +37,54 @@ describe('authorized resources and the ICS cache', () => {
     expect(login.statusCode, login.body).toBe(200);
     cookie = String(login.headers['set-cookie']).split(';')[0]; csrf = login.json().csrf; calendar = login.json().calendars[0];
     session = system.sessions.get(cookie.split('=')[1]);
+  });
+
+  it('accounts for cache and pending-operation budgets independently in each application', async () => {
+    const other = await createApp(config);
+    const document = 'x'.repeat(1024 * 1024), intended = 'x'.repeat(4 * 1024 * 1024);
+    const fill = (current: Session, count: number) => {
+      const calendarId = current.calendars.keys().next().value!;
+      for (let index = 0; index < count; index++) retainResource(current, { id: `event-${index}`, calendarId,
+        url: new URL(`u/calendar/event-${index}.ics`, dav.url).href, etag: '"1"', ics: document });
+      retainOperation(current, { id: randomUUID(), calendarId, resourceId: 'event-0', url: new URL('u/calendar/event-0.ics', dav.url).href,
+        fingerprint: 'pending', method: 'PUT', state: 'uncertain', intended });
+    };
+    try {
+      fill(session, 1);
+      for (let index = 0; index < 8; index++) {
+        const login = await other.app.inject({ method: 'POST', url: '/api/session', headers: { origin }, payload: { method: 'basic', username: 'user', password: 'password' } });
+        expect(login.statusCode, login.body).toBe(200);
+        const current = other.sessions.get(String(login.headers['set-cookie']).split(';')[0].split('=')[1]);
+        expect(current.cache).not.toBe(session.cache); expect(current.jobs).not.toBe(session.jobs);
+        fill(current, 8);
+        expect(current.cacheBytes).toBe(8 * 1024 * 1024);
+      }
+      expect(session.resources.size).toBe(1); expect(session.cacheBytes).toBe(1024 * 1024);
+      expect(session.operations.values().next().value?.intended).toBe(intended);
+      await other.app.close();
+      expect(session.cacheBytes).toBe(1024 * 1024); expect(session.abort.signal.aborted).toBe(false);
+    } finally { await other.app.close(); }
+  });
+
+  it('closing one application leaves another application worker running', async () => {
+    const other = await createApp(config);
+    try {
+      const running = session.jobs.run({ kind: 'write', draft, uid: 'still-running' });
+      await other.app.close();
+      expect(await running).toContain('UID:still-running');
+      await expect(other.sessions.jobs.run({ kind: 'write', draft, uid: 'closed' })).rejects.toMatchObject({ code: 'BUSY' });
+    } finally { await other.app.close(); }
+  });
+
+  it('limits worker capacity per application', async () => {
+    const other = await createApp(config);
+    try {
+      const running = Promise.all(Array.from({ length: 4 }, (_, index) => session.jobs.run({ kind: 'write', draft, uid: `worker-${index}` })));
+      await expect(session.jobs.run({ kind: 'write', draft, uid: 'busy' })).rejects.toMatchObject({ code: 'BUSY' });
+      const independent = other.sessions.jobs.run({ kind: 'write', draft, uid: 'independent' });
+      expect(await independent).toContain('UID:independent');
+      expect(await running).toHaveLength(4);
+    } finally { await other.app.close(); }
   });
   afterEach(async () => { vi.restoreAllMocks(); await system?.app.close(); await dav?.close(); });
 

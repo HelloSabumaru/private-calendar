@@ -24,6 +24,15 @@ const proxy = createServer({ key: readFileSync('.certs/localhost-key.pem'), cert
   if (req.url === '/_test/change-location' && req.method === 'POST') { const path = '/u/calendar/walk.ics'; dav.objects.set(path, dav.objects.get(path)!.replace('LOCATION:The park', 'LOCATION:Changed by another client')); res.end('ok'); return; }
   if (req.url === '/_test/uncertain' && req.method === 'POST') { dav.state.mode = 'unavailable-after-put'; res.end('ok'); return; }
   if (req.url === '/_test/recover' && req.method === 'POST') { dav.state.unavailable = false; res.end('ok'); return; }
+  if (req.url === '/_test/dst' && req.method === 'POST') {
+    const base = { calendarId: '', description: '', location: '', timezone: 'Europe/Prague', allDay: false,
+      reminder: 'none' as const, recurrence: defaultRecurrence };
+    dav.objects.set('/u/calendar/fold.ics', writeEvent({ ...base, title: 'Across the clock change', start: '2026-10-25T02:30:00', end: '2026-10-25T02:30:00', startOffset: 'earlier', endOffset: 'later' }, 'fold'));
+    for (const offset of ['earlier', 'later'] as const) dav.objects.set(`/u/calendar/${offset}.ics`, writeEvent({ ...base,
+      title: `${offset === 'earlier' ? 'First' : 'Second'} repeated hour`, start: '2026-10-25T02:00:00', end: '2026-10-25T02:15:00', startOffset: offset, endOffset: offset }, offset));
+    dav.objects.set('/u/calendar/spring.ics', writeEvent({ ...base, title: 'Across the spring change', start: '2026-03-29T01:30:00', end: '2026-03-29T03:30:00' }, 'spring'));
+    res.end('ok'); return;
+  }
   const buffers: Buffer[] = []; for await (const chunk of req) buffers.push(chunk);
   const result = await app.inject({ method: req.method as 'GET', url: req.url!, headers: req.headers, payload: Buffer.concat(buffers) });
   res.writeHead(result.statusCode, result.headers); res.end(result.rawPayload);

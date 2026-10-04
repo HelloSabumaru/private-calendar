@@ -50,7 +50,7 @@ describe('session replacement at capacity', () => {
     const calendarId = old.calendars.keys().next().value!;
     const url = new URL('u/calendar/event.ics', dav.url).href;
     retainResource(old, { id: 'event', calendarId, url, etag: '"1"', ics: 'BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n' });
-    retainOperation(old, { id: 'operation', state: 'pending', resourceId: 'event', fingerprint: 'test', url, method: 'PUT', intended: 'private event' });
+    retainOperation(old, { id: 'operation', state: 'pending', resourceId: 'event', calendarId, fingerprint: 'test', url, method: 'PUT', intended: 'private event' });
     old.locks.add('event');
 
     const response = await login(cookie);

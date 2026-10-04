@@ -209,6 +209,20 @@ END:VCALENDAR
         assert exported_created['DTSTART'].dt.utcoffset() == datetime.timedelta(hours=2), exported_created
         search = api('GET', '/search?' + requests.compat.urlencode({'q': 'Imported independent', 'start': '2026-01-01T00:00:00Z', 'end': '2027-01-01T00:00:00Z', 'timezone': 'Europe/Prague', 'calendars': selected['id']}))
         assert search.status_code == 200 and len(search.json()['occurrences']) == 1, search.text
+        fold_id = str(uuid.uuid4())
+        fold = {**new, 'title': 'Across the repeated hour', 'start': '2026-10-25T02:30:00', 'end': '2026-10-25T02:30:00',
+                'startOffset': 'earlier', 'endOffset': 'later', 'reminder': 'none',
+                'recurrence': {'frequency': 'NONE', 'interval': 1, 'weekdays': [], 'end': 'never'}}
+        saved_fold = api('POST', '/events', fold, {'Idempotency-Key': str(uuid.uuid4()), 'X-Event-ID': fold_id})
+        assert saved_fold.status_code == 200 and saved_fold.json()['state'] == 'success', saved_fold.text
+        independent_fold = calendar.event_by_uid(fold_id + '@private-calendar')
+        independent_fold.load()
+        component = icalendar.Calendar.from_ical(independent_fold.data).walk('VEVENT')[0]
+        assert component['DTSTART'].dt.hour == 0 and component['DTEND'].dt.hour == 1, component
+        assert component['DTEND'].dt - component['DTSTART'].dt == datetime.timedelta(hours=1), component
+        fold_detail = api('GET', '/events/' + saved_fold.json()['resourceId']).json()['draft']
+        assert fold_detail['start'] == fold_detail['end'] == '2026-10-25T02:30:00', fold_detail
+        assert fold_detail['startOffset'] == 'earlier' and fold_detail['endOffset'] == 'later', fold_detail
         created_detail = api('GET', '/events/' + created.json()['resourceId']).json()
         deleted = api('DELETE', '/events/' + created.json()['resourceId'], extra={'If-Match': created_detail['etag'], 'Idempotency-Key': str(uuid.uuid4())})
         assert deleted.json()['state'] == 'success', deleted.text

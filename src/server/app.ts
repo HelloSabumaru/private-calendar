@@ -15,7 +15,6 @@ import { Diagnostics, safeError, safeMethod } from './diagnostics.js';
 import { SessionStore, type Session } from './sessions.js';
 import { authenticate, detail, discover, exportCalendar, fetchResource, getResource, importEvent, mutate, publicOperation, readRange, reconcile } from './dav.js';
 import { timezoneNames, timezoneVersion } from './timezones.js';
-import { runICS, stopWorkers } from './jobs.js';
 
 declare module 'fastify' { interface FastifyRequest { calendarSession?: Session; calendarDiagnostics: Diagnostics } }
 const cookieName = '__Host-calendar';
@@ -75,7 +74,7 @@ export async function createApp(config: Config, options: { fetch?: typeof fetch;
     const login = loginSchema.parse(request.body);
     if (login.method === 'basic' && (login.username.includes(':') || /[\r\n]/.test(login.username))) throw new ApiError(400, 'USERNAME', 'The username contains unsupported characters.');
     if (login.method === 'bearer' && /[\r\n]/.test(login.token)) throw new ApiError(400, 'TOKEN', 'The token contains unsupported characters.');
-    const session = await authenticate(config, login, options.fetch, request.calendarDiagnostics);
+    const session = await authenticate(config, login, sessions, options.fetch, request.calendarDiagnostics);
     try { sessions.add(session, request.cookies[cookieName]); } catch (error) {
       session.abort.abort(); session.client.credentials = {}; session.client.authHeaders = undefined;
       if (session.client.account) session.client.account.credentials = {};
@@ -130,7 +129,7 @@ export async function createApp(config: Config, options: { fetch?: typeof fetch;
   app.get<{ Params: { id: string } }>('/api/calendars/:id/export', async request => exportCalendar(request.calendarSession!, config, idSchema.parse(request.params.id), request.calendarDiagnostics));
   app.post('/api/import/preview', async request => {
     const { ics } = z.object({ ics: z.string().min(1).max(240000) }).parse(request.body);
-    return request.calendarDiagnostics.run('import-parse', 'ics-processing', () => runICS({ kind: 'import', ics }));
+    return request.calendarDiagnostics.run('import-parse', 'ics-processing', () => request.calendarSession!.jobs.run({ kind: 'import', ics }));
   });
   app.post('/api/import', async request => {
     const operationId = operationSchema.parse(request.headers['idempotency-key']);
@@ -176,6 +175,6 @@ export async function createApp(config: Config, options: { fetch?: typeof fetch;
     if (hasStaticRoot && request.method === 'GET' && !request.url.startsWith('/api/') && !/\.[a-z0-9]+(?:\?|$)/i.test(request.url)) return reply.header('Cache-Control', 'no-cache').sendFile('index.html');
     return reply.code(404).send({ code: 'NOT_FOUND', message: 'Not found.' });
   });
-  app.addHook('onClose', async () => { clearInterval(sweep); sessions.close(); await stopWorkers(); });
+  app.addHook('onClose', async () => { clearInterval(sweep); await sessions.close(); });
   return { app, sessions };
 }

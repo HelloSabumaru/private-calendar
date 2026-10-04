@@ -3,8 +3,7 @@ import type { Operation } from '../shared.js';
 import { CalDavAccess, occurrenceId, type MutationCommand, type PreparedMutation } from './caldav-access.js';
 import { ApiError } from './errors.js';
 import { Diagnostics } from './diagnostics.js';
-import { runICS } from './jobs.js';
-import { discardResource, retainOperation, type Mutation, type Session } from './sessions.js';
+import { discardResource, retainOperation, type Mutation, type ResourceLocation, type Session } from './sessions.js';
 
 const trackers = new WeakMap<Session, OperationTracker>();
 export function operationTracker(session: Session) {
@@ -25,6 +24,14 @@ export class OperationTracker {
   private requests = new Map<string, { fingerprint: string; running: Promise<Operation> }>();
   private inspections = new Map<string, Promise<void>>();
   constructor(private session: Session) {}
+
+  confirmAbsence(resource: ResourceLocation) {
+    for (const operation of this.session.operations.values()) {
+      if (operation.state === 'uncertain' && operation.method === 'DELETE' && operation.resourceId === resource.id &&
+          operation.calendarId === resource.calendarId && operation.url === resource.url) this.succeed(operation);
+    }
+    discardResource(this.session, resource.id);
+  }
 
   run(command: MutationCommand, access: CalDavAccess, diagnostics = new Diagnostics()): Promise<Operation> {
     if (this.session.abort.signal.aborted) return Promise.reject(new ApiError(401, 'SESSION_EXPIRED', 'Your session ended. Sign in again.'));
@@ -77,7 +84,7 @@ export class OperationTracker {
     this.session.locks.add(resource.id);
     try {
       const prepared = await diagnostics.run('mutation-prepare', 'internal', () => access.prepare(command, resource, previous?.intended));
-      const operation: Mutation = { id: command.operationId, fingerprint, state: 'pending', resourceId: resource.id, url: resource.url,
+      const operation: Mutation = { id: command.operationId, fingerprint, state: 'pending', resourceId: resource.id, calendarId: resource.calendarId, url: resource.url,
         method: prepared.method, ...(prepared.mode === 'delete' ? { etag: prepared.etag } : { intended: prepared.intended, ...(prepared.mode === 'update' ? { etag: prepared.etag } : {}) }) };
       retainOperation(this.session, operation);
       operation.running = this.write(command, prepared, operation, access, diagnostics);
@@ -121,12 +128,13 @@ export class OperationTracker {
   private async inspect(operation: Mutation, access: CalDavAccess, diagnostics: Diagnostics) {
     try {
       const response = await access.inspect(operation);
+      if (operation.state !== 'uncertain') return;
       if (response.status === 404) {
         if (operation.method === 'DELETE') this.succeed(operation);
         else { operation.state = 'failed'; operation.error = 'The event was not found. Retry the same draft to resolve the write safely.'; }
       } else if (response.ok && operation.method === 'PUT') {
-        const actual = await diagnostics.run('reconciliation-canonical-actual', 'ics-processing', async () => runICS({ kind: 'canonical', ics: await response.text() }));
-        const intended = await diagnostics.run('reconciliation-canonical-intended', 'ics-processing', () => runICS({ kind: 'canonical', ics: operation.intended! }));
+        const actual = await diagnostics.run('reconciliation-canonical-actual', 'ics-processing', async () => this.session.jobs.run({ kind: 'canonical', ics: await response.text() }));
+        const intended = await diagnostics.run('reconciliation-canonical-intended', 'ics-processing', () => this.session.jobs.run({ kind: 'canonical', ics: operation.intended! }));
         if (actual === intended) this.succeed(operation);
         else { operation.state = 'failed'; operation.error = 'The server contains a different version. Reload and review before retrying.'; }
       } else if (response.ok) { operation.state = 'failed'; operation.error = 'The event still exists. Reload it before retrying deletion.'; }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import type { Login, Occurrence, Preferences as Settings } from '../shared';
-import { addDays, addMonths, dateLabel, groupEventsByDate, monthDays, monthLabel, monthStart, timeLabel, today, wallTime, weekStart } from './dates';
+import { addDays, addMonths, dateLabel, groupEventsByDate, monthDays, monthLabel, monthStart, timeLabel, today, wallTime, weekStart, type OffsetChoice } from './dates';
 import { Editor } from './Editor';
 import { Preferences } from './Preferences';
 import { Dialog } from './Dialog';
@@ -60,9 +60,9 @@ export function App() {
   }, [menuOpen]);
   const savePreferences = (value: Settings) => { storePreferences(value); setSettingsOpen(false); };
   const openEvent = (event: Occurrence) => { search.closeSearch(); editing.openEvent(event); };
-  const dropEvent = (eventId: string, targetDate: string, targetTime?: string) => {
+  const dropEvent = (eventId: string, targetDate: string, targetTime?: string, targetOffset?: OffsetChoice) => {
     const event = events.find(item => item.id === eventId);
-    if (event) { search.closeSearch(); void editEvent(event, !!event.recurrenceId, targetDate, targetTime); }
+    if (event) { search.closeSearch(); void editEvent(event, !!event.recurrenceId, targetDate, targetTime, targetOffset); }
   };
   const signOut = () => {
     if (editor && !window.confirm('Discard your open draft and sign out?')) return;
@@ -114,7 +114,7 @@ export function App() {
         </div>
         {error && <div className="notice" role="alert">{error}<button onClick={refresh}>Retry</button></div>}
         {!!warnings.length && <details className="notice"><summary>Incomplete refresh ({warnings.length})</summary><ul>{warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></details>}
-        {view === 'week' || view === 'day' ? <TimeGrid activeDate={date} dates={view === 'week' ? weekDates(start) : [date]} eventDays={eventDays} timezone={prefs.timezone} hour12={prefs.hour12} colorStyle={id => colorStyle(calendarColor(id))} onOpen={openEvent} onAdd={(day, time) => addEvent(day, time, !time)} onDrop={dropEvent} onDay={day => { selectDate(day); setView('day'); }} /> : view === 'month' ? <>
+        {view === 'week' || view === 'day' ? <TimeGrid activeDate={date} dates={view === 'week' ? weekDates(start) : [date]} eventDays={eventDays} timezone={prefs.timezone} hour12={prefs.hour12} colorStyle={id => colorStyle(calendarColor(id))} onOpen={openEvent} onAdd={(day, time, offset) => addEvent(day, time, !time, offset)} onDrop={dropEvent} onDay={day => { selectDate(day); setView('day'); }} /> : view === 'month' ? <>
           <div className="month-grid" role="grid" aria-label={monthLabel(date)} aria-busy={loading}>
             <div className="weekday-row" role="row">{Array.from({ length: 7 }, (_, i) => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][(i + prefs.firstWeekday) % 7]).map(day => <div role="columnheader" key={day}>{day}</div>)}</div>
             {Array.from({ length: 6 }, (_, week) => <div className="week-row" role="row" key={week}>{days.slice(week * 7, week * 7 + 7).map(day => {

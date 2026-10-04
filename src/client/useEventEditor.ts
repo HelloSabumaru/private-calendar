@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Temporal } from '@js-temporal/polyfill';
 import { defaultRecurrence, type Calendar, type EventDetail, type EventDraft, type Occurrence, type Preferences } from '../shared';
 import { api, errorMessage, RequestError } from './api';
-import { addDays, moveDraft } from './dates';
+import { addDays, moveDraft, offsetChoice, type OffsetChoice } from './dates';
 import type { SessionBoundary } from './useSession';
 
 type EditState = { key: string; initial: EventDraft; detail?: EventDetail; accountKey: string };
@@ -18,7 +19,7 @@ export function useEventEditor(boundary: SessionBoundary, date: string, prefs: P
     if (transition.type === 'logout' || transition.accountChanged) updateEditor(undefined);
   }), [boundary, cancel, updateEditor]);
   useEffect(() => cancel, [cancel]);
-  const addEvent = (onDate = date, time?: string, allDay = false) => {
+  const addEvent = (onDate = date, time?: string, allDay = false, startOffset?: OffsetChoice) => {
     const ticket = boundary.capture();
     if (!ticket) return;
     cancel(); setScope(undefined); setReadOnly(undefined);
@@ -26,13 +27,15 @@ export function useEventEditor(boundary: SessionBoundary, date: string, prefs: P
     const calendarId = writable.find(calendar => calendar.id === prefs.defaultCalendar)?.id ?? writable[0]?.id;
     if (!calendarId) { onError('No writable calendar is available.'); return; }
     const start = `${onDate}T${time ?? '09:00'}:00`;
-    const end = new Date(Date.parse(`${start}Z`) + 3600000).toISOString().slice(0, 19);
+    const zonedStart = Temporal.PlainDateTime.from(start).toZonedDateTime(prefs.timezone, { disambiguation: startOffset ?? 'compatible' });
+    const zonedEnd = zonedStart.add({ hours: 1 });
     updateEditor({ key: crypto.randomUUID(), accountKey: ticket.accountKey, initial: {
-      calendarId, title: '', location: '', description: '', start: allDay ? onDate : start, end: allDay ? addDays(onDate, 1) : end,
+      calendarId, title: '', location: '', description: '', start: allDay ? onDate : start, end: allDay ? addDays(onDate, 1) : zonedEnd.toPlainDateTime().toString({ smallestUnit: 'second' }),
+      ...(!allDay ? { startOffset, endOffset: offsetChoice(zonedEnd) } : {}),
       allDay, timezone: prefs.timezone, recurrence: { ...defaultRecurrence }, reminder: prefs.reminder,
     } });
   };
-  const editEvent = async (event: Occurrence, occurrence = false, targetDate?: string, targetTime?: string) => {
+  const editEvent = async (event: Occurrence, occurrence = false, targetDate?: string, targetTime?: string, targetOffset?: OffsetChoice) => {
     const ticket = boundary.capture();
     if (!ticket) return;
     cancel(); setReadOnly(undefined);
@@ -44,7 +47,7 @@ export function useEventEditor(boundary: SessionBoundary, date: string, prefs: P
       if (!isCurrent()) return;
       if (targetDate && (!detail.canUpdate || !detail.scheduleEditable)) { onError(detail.editReason ?? 'This event cannot be moved.'); return; }
       setScope(undefined);
-      updateEditor({ key: crypto.randomUUID(), accountKey: ticket.accountKey, initial: targetDate ? moveDraft(detail.draft, targetDate, targetTime) : detail.draft, detail });
+      updateEditor({ key: crypto.randomUUID(), accountKey: ticket.accountKey, initial: targetDate ? moveDraft(detail.draft, targetDate, targetTime, targetOffset, prefs.timezone) : detail.draft, detail });
     } catch (error) {
       if (!isCurrent()) return;
       if (error instanceof RequestError && error.status === 422) { setScope(undefined); setReadOnly({ event, reason: error.message }); }

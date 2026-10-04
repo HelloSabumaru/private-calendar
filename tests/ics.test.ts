@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import ICAL from 'ical.js';
 import { defaultRecurrence, type EventDraft } from '../src/shared.js';
 import { canonicalICS, eventDetail, expandResources, parseCalendar, resolveWall, mergeExport, occurrenceDetail, splitImport, writeEvent, writeOccurrence } from '../src/server/ics.js';
-import { runICS } from '../src/server/jobs.js';
+import { IcsWorkers } from '../src/server/jobs.js';
 
 export const draft: EventDraft = { calendarId: 'test', title: 'Walk', description: 'Bring tea', location: 'Park', start: '2026-10-04T09:00:00', end: '2026-10-04T10:00:00', allDay: false, timezone: 'Europe/Prague', reminder: 1440, recurrence: defaultRecurrence };
 export const wrap = (body: string) => `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Independent client//EN\r\n${body.trim().replace(/\r?\n/g, '\r\n')}\r\nEND:VCALENDAR\r\n`;
@@ -88,6 +88,17 @@ describe('calendar standards and preservation', () => {
     expect(expand(ics).occurrences[0].start).toBe('2026-10-25T01:30:00.000Z');
     expect(eventDetail(resource(ics)).draft.start).toBe('2026-10-25T02:30:00');
   });
+  it('round-trips a full elapsed hour with identical wall times and different offsets', () => {
+    const ics = writeEvent({ ...draft, start: '2026-10-25T02:30:00', end: '2026-10-25T02:30:00', startOffset: 'earlier', endOffset: 'later' }, 'across-fold');
+    expect(expand(ics).occurrences[0]).toMatchObject({ start: '2026-10-25T00:30:00.000Z', end: '2026-10-25T01:30:00.000Z' });
+    expect(eventDetail(resource(ics)).draft).toMatchObject({ start: '2026-10-25T02:30:00', end: '2026-10-25T02:30:00', startOffset: 'earlier', endOffset: 'later', timezone: 'Europe/Prague' });
+  });
+  it.each(['earlier', 'later'] as const)('keeps a nonrecurring event entirely within the %s repeated hour', offset => {
+    const ics = writeEvent({ ...draft, start: '2026-10-25T02:00:00', end: '2026-10-25T02:15:00', startOffset: offset, endOffset: offset }, offset);
+    const hour = offset === 'earlier' ? '00' : '01';
+    expect(expand(ics).occurrences[0]).toMatchObject({ start: `2026-10-25T${hour}:00:00.000Z`, end: `2026-10-25T${hour}:15:00.000Z` });
+    expect(eventDetail(resource(ics)).draft).toMatchObject({ startOffset: offset, endOffset: offset });
+  });
   it('uses inclusive recurrence end dates', () => {
     const ics = writeEvent({ ...draft, recurrence: { ...defaultRecurrence, frequency: 'DAILY', end: 'until', until: '2026-10-06' } }, 'until');
     expect(expand(ics).occurrences.map(e => e.start.slice(8, 10))).toEqual(['04', '05', '06']);
@@ -112,7 +123,9 @@ describe('calendar standards and preservation', () => {
     expect(expand(ics).warnings[0]).toContain('has no definition');
   });
   it('processes ICS in an isolated worker', async () => {
-    const result = await runICS({ kind: 'write', draft, uid: 'worker' }); expect(result).toContain('UID:worker');
+    const workers = new IcsWorkers();
+    try { const result = await workers.run({ kind: 'write', draft, uid: 'worker' }); expect(result).toContain('UID:worker'); }
+    finally { await workers.close(); }
   });
 });
 

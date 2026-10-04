@@ -119,8 +119,12 @@ function draftTime(value: string, draft: EventDraft, choice?: 'earlier' | 'later
     if (!knownZones.has(zone)) throw new ApiError(422, 'TIMEZONE_UNKNOWN', 'Choose a supported timezone.');
     const resolved = resolveWall(value, zone, choice);
     const early = plain.toZonedDateTime(zone, { disambiguation: 'earlier' });
-    if (resolved.epochMilliseconds !== early.epochMilliseconds) {
-      if (draft.recurrence.frequency !== 'NONE') throw new ApiError(422, 'DST_OVERLAP', 'Recurring events must use the earlier offset, as required by iCalendar.');
+    const late = plain.toZonedDateTime(zone, { disambiguation: 'later' });
+    if (draft.recurrence.frequency !== 'NONE' && resolved.epochMilliseconds !== early.epochMilliseconds) {
+      throw new ApiError(422, 'DST_OVERLAP', 'Recurring events must use the earlier offset, as required by iCalendar.');
+    }
+    // UTC keeps either selected instant unambiguous for a nonrecurring event.
+    if (draft.recurrence.frequency === 'NONE' && early.epochMilliseconds !== late.epochMilliseconds) {
       return ICAL.Time.fromJSDate(new Date(resolved.epochMilliseconds), true);
     }
   } else zone = 'floating';

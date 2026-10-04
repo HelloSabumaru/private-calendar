@@ -174,6 +174,93 @@ test('week and day views navigate and create events in time slots', async ({ pag
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test('an uncertain deletion settles after an event read confirms absence', async ({ page, request }) => {
+  const loaded = page.waitForResponse(response => /\/api\/events\/[^/?]+$/.test(response.url()) && response.ok());
+  await page.getByRole('button', { name: /Morning walk/ }).click();
+  const { id } = await (await loaded).json();
+  await request.post('/_test/uncertain');
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: 'Delete event', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Check status', exact: true })).toBeEnabled();
+  await request.post('/_test/recover');
+  expect(await page.evaluate(async id => (await fetch(`/api/events/${id}`)).status, id)).toBe(404);
+  await page.getByRole('button', { name: 'Check status', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Morning walk/ })).toHaveCount(0);
+});
+
+test('the repeated autumn hour has distinct positions, offsets, and selectable slots', async ({ page, request }) => {
+  await request.post('/_test/dst');
+  await page.getByRole('button', { name: 'Choose date', exact: true }).click();
+  await page.getByLabel('Date', { exact: true }).fill('25/10/2026');
+  await page.getByRole('button', { name: 'Go', exact: true }).click();
+  await page.getByRole('button', { name: 'Day', exact: true }).click();
+  const across = page.getByRole('button', { name: /Across the clock change/ });
+  await expect(across).toBeVisible();
+  await expect(across).toHaveCSS('height', '88px');
+  await expect(across).toContainText('02:30 UTC+02:00 – 02:30 UTC+01:00');
+  await expect(page.locator('.time-column')).toHaveCSS('height', '2200px');
+  await expect(page.getByRole('button', { name: /First repeated hour/ })).toHaveCSS('top', '176px');
+  await expect(page.getByRole('button', { name: /Second repeated hour/ })).toHaveCSS('top', '264px');
+  for (const choice of ['later', 'earlier'] as const) {
+    const offset = choice === 'earlier' ? '+02:00' : '+01:00';
+    const slot = page.getByRole('button', { name: `New event on Sunday 25 October at 02:30 UTC${offset}`, exact: true });
+    await slot.scrollIntoViewIfNeeded();
+    const box = (await slot.boundingBox())!;
+    await slot.click({ position: { x: box.width - 8, y: 32 } });
+    await expect(page.getByLabel('Start time', { exact: true })).toHaveValue('02:30');
+    await expect(page.getByLabel('End time', { exact: true })).toHaveValue(choice === 'earlier' ? '02:30' : '03:30');
+    await expect(page.getByRole('combobox', { name: 'Start offset', exact: true })).toHaveValue(choice);
+    await page.getByLabel('Title', { exact: true }).fill(`${choice} slot event`);
+    await page.getByRole('button', { name: 'Save event', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: new RegExp(`${choice} slot event`) })).toHaveCSS('height', '88px');
+  }
+  const target = page.getByRole('button', { name: 'New event on Sunday 25 October at 02:00 UTC+02:00', exact: true });
+  await target.scrollIntoViewIfNeeded();
+  const box = (await target.boundingBox())!;
+  await across.dragTo(target, { targetPosition: { x: box.width - 8, y: 32 } });
+  await expect(page.getByLabel('Start time', { exact: true })).toHaveValue('02:00');
+  await expect(page.getByLabel('End time', { exact: true })).toHaveValue('02:00');
+  await expect(page.getByRole('combobox', { name: 'Start offset', exact: true })).toHaveValue('earlier');
+  await expect(page.getByRole('combobox', { name: 'End offset', exact: true })).toHaveValue('later');
+  await page.getByRole('button', { name: 'Save event', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(across).toHaveCSS('height', '88px');
+  await expect(across).toHaveCSS('top', '176px');
+});
+
+test('a DST week labels the changed clocks within its day column', async ({ page, request }) => {
+  await request.post('/_test/dst');
+  await page.getByRole('button', { name: 'Choose date', exact: true }).click();
+  await page.getByLabel('Date', { exact: true }).fill('25/10/2026');
+  await page.getByRole('button', { name: 'Go', exact: true }).click();
+  await page.getByRole('button', { name: 'Week', exact: true }).click();
+  await expect(page.getByRole('button', { name: /Across the clock change/ })).toHaveCSS('height', '88px');
+  const sunday = page.locator('.time-column').last();
+  await expect(sunday).toHaveCSS('height', '2200px');
+  await expect(sunday.locator('.time-slot-label').filter({ hasText: 'UTC+02:00' }).first()).toBeAttached();
+  await expect(sunday.locator('.time-slot-label').filter({ hasText: 'UTC+01:00' }).first()).toBeAttached();
+  await expect(sunday.locator('.time-slot-label').filter({ hasText: /^0?3:00$/ })).toHaveCount(1);
+});
+
+test('the short spring day skips missing slots and creates one elapsed-hour events', async ({ page, request }) => {
+  await request.post('/_test/dst');
+  await page.getByRole('button', { name: 'Choose date', exact: true }).click();
+  await page.getByLabel('Date', { exact: true }).fill('29/03/2026');
+  await page.getByRole('button', { name: 'Go', exact: true }).click();
+  await page.getByRole('button', { name: 'Day', exact: true }).click();
+  await expect(page.getByRole('button', { name: /Across the spring change/ })).toHaveCSS('height', '88px');
+  await expect(page.locator('.time-column')).toHaveCSS('height', '2024px');
+  await expect(page.getByRole('button', { name: 'New event on Sunday 29 March at 02:30', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'New event on Sunday 29 March at 01:00', exact: true }).click();
+  await expect(page.getByLabel('End time', { exact: true })).toHaveValue('03:00');
+  await page.getByLabel('Title', { exact: true }).fill('Spring slot event');
+  await page.getByRole('button', { name: 'Save event', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Spring slot event/ })).toHaveCSS('height', '88px');
+});
+
 test('European dates reject invalid days and search matches accented locations', async ({ page }) => {
   await page.getByRole('button', { name: 'New event' }).click();
   await page.getByLabel('Title', { exact: true }).fill('Invalid date');
